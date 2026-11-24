@@ -639,7 +639,9 @@ k.scene('world',({attract,lab})=>{
   function wallName(w){return w.tier?`wall_${w.tier}_${(w.hp/TIERS[w.tier].hp)>0.5?0:(w.hp/TIERS[w.tier].hp)>0.2?1:2}`:'wall_0';}
   function wallPlace(w){const name=wallName(w),m=META[name],flip=w.x<0&&w.tier>0;const left=w.x-(flip?21:26)+(w.shake>0?Math.round(rnd(-1,1)):0);
     return{name,flip,left,top:-m.h,torch:w.tier?{x:left+(flip?m.w-1-5:5),y:-m.h+30}:null};}
-  for(const x of WALL_X)k.add(['wall',k.z(20),{x,tier:Math.abs(x)===85?1:0,hp:Math.abs(x)===85?80:0,shake:0,
+  // the two inner slots start with plank barricades
+  const inner=Math.min(...WALL_X.map(Math.abs));
+  for(const x of WALL_X)k.add(['wall',k.z(20),{x,tier:Math.abs(x)===inner?1:0,hp:Math.abs(x)===inner?TIERS[1].hp:0,shake:0,
     draw(){const p=wallPlace(this);spr(p.name,p.left,p.top,p.flip);}}]);
   const setTier=(w,t)=>{w.tier=t;w.hp=t?TIERS[t].hp:0;};
 
