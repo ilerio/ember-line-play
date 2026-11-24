@@ -287,30 +287,42 @@ const FOG_SEE=113,FOG_FADE=25; // fog: zombies fade in between 138 and 113 nativ
 function rollWeather(){let r=Math.random()*Object.values(WEATHER).reduce((a,w)=>a+w.w,0);
   for(const[key,w]of Object.entries(WEATHER)){r-=w.w;if(r<0)return key;}return'clear';}
 
-// ---------- sprites: decode the atlas into canvases and hand them to Kaplay
+// ---------- sprites: decode the atlas into pixels and hand them to Kaplay
 const unrle=rows=>rows.map(r=>{let o='',n='';for(const ch of r){if(ch>='0'&&ch<='9'){n+=ch;continue;}o+=ch.repeat(n?+n:1);n='';}return o;});
 const rowsOf=s=>s._r||(s._r=unrle(s.rows));
-function toCanvas(rows,w,h,colour){const c=document.createElement('canvas');c.width=w;c.height=h;const g=c.getContext('2d'),im=g.createImageData(w,h);
+// Raw pixels (ImageData), not a canvas: Kaplay uploads each sprite to the GPU, and uploading a canvas forces a slow
+// GPU readback per sprite (about 8 s for all of them on some machines). ImageData uploads straight from memory
+function toImage(rows,w,h,colour){const im=new ImageData(w,h);
   for(let y=0;y<h;y++)for(let x=0;x<w;x++){const ch=rows[y][x];if(ch==='.')continue;const hex=colour(ch);if(!hex)continue;const o=(y*w+x)*4;
     im.data[o]=parseInt(hex.slice(0,2),16);im.data[o+1]=parseInt(hex.slice(2,4),16);im.data[o+2]=parseInt(hex.slice(4,6),16);im.data[o+3]=255;}
-  g.putImageData(im,0,0);return c;}
+  return im;}
 // walker clothing: the work look is drawn in the sheets; office and police swap the shirt and trouser colours
 const WK_DRESS={office:{'5b5f66':'a39d8e','3e4147':'77725f','3a352e':'34373e','29251f':'24262b'},
   police:{'5b5f66':'3d4c6b','3e4147':'2a3552','3a352e':'27304a','29251f':'1b2133'}};
-const META={};
+const META={},SPR=[],addSpr=(key,im)=>SPR.push([key,im]);
 for(const [name,s] of Object.entries(A.sprites)){const rows=rowsOf(s);let b=rows.length-1;while(b>0&&!/[^.]/.test(rows[b]))b--;META[name]={w:s.w,h:s.h,bottom:b,eyes:s.eyes||null,ang:s.ang??null,pip:s.pip||null,arm:s.arm||null,noArm:!!s.noArm,ax:s.ax??null,muzzle:s.muzzle||null};
-  if(s.raw)continue;k.loadSprite(name,toCanvas(rows,s.w,s.h,ch=>s.pal[ch]));
-  if(/^walker_/.test(name))for(const[d,map]of Object.entries(WK_DRESS))k.loadSprite(name+'@'+d,toCanvas(rows,s.w,s.h,ch=>map[s.pal[ch]]||s.pal[ch]));
-  if(/^(walker|runner|brute)_/.test(name))k.loadSprite(name+'#white',toCanvas(rows,s.w,s.h,()=> 'ffffff'));
-  if(/^keeper_/.test(name))k.loadSprite(name+'#hurt',toCanvas(rows,s.w,s.h,()=> 'ff6a4d'));}
+  if(s.raw)continue;addSpr(name,toImage(rows,s.w,s.h,ch=>s.pal[ch]));
+  if(/^walker_/.test(name))for(const[d,map]of Object.entries(WK_DRESS))addSpr(name+'@'+d,toImage(rows,s.w,s.h,ch=>map[s.pal[ch]]||s.pal[ch]));
+  if(/^(walker|runner|brute)_/.test(name))addSpr(name+'#white',toImage(rows,s.w,s.h,()=> 'ffffff'));
+  if(/^keeper_/.test(name))addSpr(name+'#hurt',toImage(rows,s.w,s.h,()=> 'ff6a4d'));}
 // survivors are layered: the body (recoloured per shirt and skin), the hair (per shape and colour), then the role's prop
 function svPal(shirt,skin,hair){const sv=A.survivor,sh=sv.shirt[shirt];return Object.assign({},sv.common,{S:sv.skin[skin][0],s:sv.skin[skin][1],D:sv.hair[hair][0],d:sv.hair[hair][1],C:sh[0],c:sh[1],L:sh[2]});}
-const rawSprite=(name,key,pal)=>{const s=A.sprites[name];k.loadSprite(key,toCanvas(rowsOf(s),s.w,s.h,ch=>pal[ch]));};
+const rawSprite=(name,key,pal)=>{const s=A.sprites[name];addSpr(key,toImage(rowsOf(s),s.w,s.h,ch=>pal[ch]));};
 for(const[anim,[cnt]]of Object.entries(SV_ANIM))for(let i=0;i<cnt;i++){
   for(const shirt of SHIRTS)for(const skin of SKINS)rawSprite(`sv_${anim}_body_${i}`,`svb_${anim}_${i}_${shirt}_${skin}`,svPal(shirt,skin,'brown'));
   for(let h=0;h<3;h++)for(const hair of HAIRS)rawSprite(`sv_${anim}_hair${h}_${i}`,`svh_${anim}_${i}_${h}_${hair}`,svPal('idle','light',hair));
   for(const p of['builder','gunner','scav','wand'])rawSprite(`sv_${anim}_${p}_${i}`,`svp_${anim}_${i}_${p}`,A.survivor.common);}
-for(const which of ['far','near'])for(const [key,T] of Object.entries(A.times)){const s=A[which];k.loadSprite(`${which}_${key}`,toCanvas(rowsOf(s),s.w,s.h,()=>which==='far'?T.far:T.near));}
+for(const which of ['far','near'])for(const [key,T] of Object.entries(A.times)){const s=A[which];addSpr(`${which}_${key}`,toImage(rowsOf(s),s.w,s.h,()=>which==='far'?T.far:T.near));}
+// pack every sprite into 2048 px pages and upload each page to the GPU once. One upload per sprite (over 1,500 of them)
+// stalled the first load for seconds. A 1 px gap keeps neighbours from bleeding; anything wider than a page loads alone
+(function packSprites(){const P=2048,pages=[];let page,x=0,y=0,rowH=0;
+  const newPage=()=>{page={im:new ImageData(P,P),data:{}};pages.push(page);x=0;y=0;rowH=0;};newPage();
+  for(const[key,im]of SPR.slice().sort((a,b)=>b[1].height-a[1].height)){const w=im.width,h=im.height;
+    if(w>P||h>P){k.loadSprite(key,im);continue;}
+    if(x+w>P){x=0;y+=rowH+1;rowH=0;}if(y+h>P)newPage();
+    for(let r=0;r<h;r++)page.im.data.set(im.data.subarray(r*w*4,(r+1)*w*4),((y+r)*P+x)*4);
+    page.data[key]={x,y,width:w,height:h};x+=w+1;rowH=Math.max(rowH,h);}
+  for(const p of pages)k.loadSpriteAtlas(p.im,p.data);})();
 
 // ---------- shaders: darkness with light pools (play line only) and the flashlight haze
 const SCREEN_TO_NATIVE=`vec2 nat(vec2 pos){return floor(vec2((pos.x*0.5+0.5)*u_res.x,(0.5-pos.y*0.5)*u_res.y)/u_scale);}
