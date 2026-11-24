@@ -2,4 +2,4 @@
 
 Play it at https://ilerio.github.io/ember-line-play/
 
-Built from 382295a on 2026-11-24.
+Built from a7be88b on 2026-11-24.
